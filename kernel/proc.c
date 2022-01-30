@@ -10,6 +10,10 @@ struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
 
+struct sjf sjf_scheduler = { .heap_size = 0, .a = 50};
+
+
+
 struct proc *initproc;
 
 int nextpid = 1;
@@ -119,6 +123,9 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->cpu_burst_aprox = 0;
+  p->cpu_burst = 0;
+  p->timeslice = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -164,6 +171,9 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->cpu_burst_aprox = 0;
+  p->cpu_burst = 0;
+  p->timeslice = 0;
 }
 
 // Create a user page table for a given process,
@@ -242,7 +252,8 @@ userinit(void)
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
-  p->state = RUNNABLE;
+  //p->state = RUNNABLE;
+  put(p);
 
   release(&p->lock);
 }
@@ -311,9 +322,12 @@ fork(void)
   np->parent = p;
   release(&wait_lock);
 
+  /*
   acquire(&np->lock);
   np->state = RUNNABLE;
   release(&np->lock);
+   */
+  put(np);
 
   return pid;
 }
@@ -441,26 +455,42 @@ scheduler(void)
   struct cpu *c = mycpu();
   
   c->proc = 0;
-  for(;;){
-    // Avoid deadlock by ensuring that devices can interrupt.
-    intr_on();
+  for(;;) {
+      // Avoid deadlock by ensuring that devices can interrupt.
+      intr_on();
 
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+      /*
+      for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == RUNNABLE) {
+          // Switch to chosen process.  It is the process's job
+          // to release its lock and then reacquire it
+          // before jumping back to us.
+          p->state = RUNNING;
+          c->proc = p;
+          swtch(&c->context, &p->context);
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
+          // Process is done running for now.
+          // It should have changed its p->state before coming back.
+          c->proc = 0;
+        }
+        release(&p->lock);
       }
-      release(&p->lock);
-    }
+      */
+
+      p = get();
+      if (p != 0) {
+          acquire(&p->lock);
+          if (p->state == RUNNABLE) {
+              p->state = RUNNING;
+              c->proc = p;
+              swtch(&c->context, &p->context);
+
+              if (c->proc != 0 && c->proc->state == RUNNABLE) put(c->proc);
+              c->proc = 0;
+          }
+          release(&p->lock);
+      }
   }
 }
 
@@ -497,7 +527,8 @@ yield(void)
 {
   struct proc *p = myproc();
   acquire(&p->lock);
-  p->state = RUNNABLE;
+  //p->state = RUNNABLE;
+  put(p);
   sched();
   release(&p->lock);
 }
@@ -565,7 +596,8 @@ wakeup(void *chan)
     if(p != myproc()){
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
-        p->state = RUNNABLE;
+        //p->state = RUNNABLE;
+        put(p);
       }
       release(&p->lock);
     }
@@ -586,7 +618,8 @@ kill(int pid)
       p->killed = 1;
       if(p->state == SLEEPING){
         // Wake process from sleep().
-        p->state = RUNNABLE;
+        //p->state = RUNNABLE;
+        put(p);
       }
       release(&p->lock);
       return 0;
@@ -654,3 +687,103 @@ procdump(void)
     printf("\n");
   }
 }
+
+///////////////////////////
+
+void heapify_up(struct proc** arr, int n)
+{
+    if (n == 1) return;
+    int curr = n - 1;
+    int parent = (n - 1) / 2;
+
+    while (1)
+    {
+        if (arr[curr]->cpu_burst_aprox < arr[parent]->cpu_burst_aprox)
+        {
+            struct proc* tmp = arr[curr];
+            arr[curr] = arr[parent];
+            arr[parent] = tmp;
+        }
+        else break;
+        if (parent == 0) break;
+        curr = parent;
+        parent = (curr - 1) / 2;
+    }
+}
+
+void heapify_down(struct proc** arr, int n)
+{
+    if (n == 1) return;
+    int curr = 0;
+    int left_child = curr * 2 + 1;
+    int right_child = curr * 2 + 2;
+
+    while(1)
+    {
+        if (left_child < n && arr[curr]->cpu_burst_aprox > arr[left_child]->cpu_burst_aprox)
+        {
+            struct proc* tmp = arr[curr];
+            arr[curr] = arr[left_child];
+            arr[left_child] = tmp;
+            curr = left_child;
+        }
+        else if (right_child < n && arr[curr]->cpu_burst_aprox > arr[right_child]->cpu_burst_aprox)
+        {
+            struct proc* tmp = arr[curr];
+            arr[curr] = arr[right_child];
+            arr[right_child] = tmp;
+            curr = right_child;
+        }
+        else break;
+        left_child = curr * 2 + 1;
+        right_child = curr * 2 + 2;
+    }
+}
+
+void put(struct proc *p)
+{
+    if (p == 0) return;
+    int cpu_already_locked_the_lock = 1;
+    if(!holding(&p->lock)) // same cpu can't aquire the same lock twice
+    {
+        acquire(&p->lock);
+        cpu_already_locked_the_lock = 0;
+    }
+    acquire(&sjf_scheduler.lock);
+    // critical section
+
+    p->state = RUNNABLE;
+
+    // exponential averaging
+    p->cpu_burst_aprox = (sjf_scheduler.a * p->cpu_burst + (100 - sjf_scheduler.a) * p->cpu_burst_aprox) / 100;
+
+    sjf_scheduler.heap[sjf_scheduler.heap_size] = p;
+    sjf_scheduler.heap_size += 1;
+    heapify_up((struct proc**) &sjf_scheduler.heap, sjf_scheduler.heap_size);
+
+    //printf("put | pid: %d | cpu_burst: %d\n", p->pid, p->cpu_burst);
+
+    // end of critical section
+    release(&sjf_scheduler.lock);
+    if (!cpu_already_locked_the_lock)
+        release(&p->lock);
+}
+
+struct proc* get()
+{
+    struct proc* ret = 0;
+    acquire(&sjf_scheduler.lock);
+
+    if (sjf_scheduler.heap_size==0) goto exit_get;
+    ret = sjf_scheduler.heap[0];
+    ret->cpu_burst = 0;
+    sjf_scheduler.heap[0] = sjf_scheduler.heap[sjf_scheduler.heap_size - 1];
+    sjf_scheduler.heap[sjf_scheduler.heap_size - 1] = 0;
+    sjf_scheduler.heap_size -= 1;
+    heapify_down((struct proc**) &sjf_scheduler.heap, sjf_scheduler.heap_size);
+
+    exit_get:    release(&sjf_scheduler.lock);
+    return ret;
+}
+
+

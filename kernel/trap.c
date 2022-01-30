@@ -29,6 +29,17 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+// timer interrupt routine
+void timer_routine(struct proc* p)
+{
+    p->cpu_burst += 1;
+
+    //printf("timer | pid: %d | cpu_burst: %d\n", myproc()->pid, myproc()->cpu_burst);
+
+    if (p->timeslice != 0 && p->cpu_burst == p->timeslice)
+        yield();
+}
+
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -77,8 +88,9 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+  if(which_dev == 2) {
+      timer_routine(p);
+  }
 
   usertrapret();
 }
@@ -150,9 +162,9 @@ kerneltrap()
   }
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING)
-    yield();
-
+  if(which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING) {
+      timer_routine(myproc());
+  }
   // the yield() may have caused some traps to occur,
   // so restore trap registers for use by kernelvec.S's sepc instruction.
   w_sepc(sepc);

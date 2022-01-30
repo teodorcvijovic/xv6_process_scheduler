@@ -8,6 +8,7 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+struct sjf;
 
 // bio.c
 void            binit(void);
@@ -105,6 +106,11 @@ int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
 
+void            put(struct proc*);
+struct proc*    get();
+void            heapify_up(struct proc**, int n);
+void            heapify_down(struct proc**, int n);
+
 // swtch.S
 void            swtch(struct context*, struct context*);
 
@@ -145,6 +151,8 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct spinlock tickslock;
 void            usertrapret(void);
+
+void            timer_routine(struct proc*);
 
 // uart.c
 void            uartinit(void);
