@@ -21,7 +21,7 @@ struct context {
 // Per-CPU state.
 struct cpu {
   struct proc *proc;          // The process running on this cpu, or null.
-  struct context context;     // swtch() here to enter scheduler().
+  struct context context;     // swtch() here to enter sched_policy().
   int noff;                   // Depth of push_off() nesting.
   int intena;                 // Were interrupts enabled before push_off()?
 };
@@ -96,6 +96,8 @@ struct proc {
   int cpu_burst_aprox;
   int cpu_burst;
   int timeslice;
+  int put_timestamp;
+  int exe_time;
 
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process
@@ -111,10 +113,13 @@ struct proc {
   char name[16];               // Process name (debugging)
 };
 
-// shortest-job-first process scheduler with exponential averaging
-struct sjf {
+// shortest-job-first process sched_policy with exponential averaging - 0
+// completely-fair process sched_policy - 1
+struct sched_policy {
     struct proc* heap[NPROC];
     int heap_size;
     struct spinlock lock;
     int a;                     // in %
+    int algorithm;             // =0 for sjf and !=0 for cfs (initially 0)
+    int is_preemptive;         // applies only on sjf algorithm
 };

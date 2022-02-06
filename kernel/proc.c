@@ -10,9 +10,8 @@ struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
 
-struct sjf sjf_scheduler = { .heap_size = 0, .a = 50};
-
-
+// initial scheduling policy is shortest-job-first
+struct sched_policy proc_sched = { .heap_size = 0, .a = 50, .algorithm = 0, .is_preemptive = 0};
 
 struct proc *initproc;
 
@@ -126,6 +125,8 @@ found:
   p->cpu_burst_aprox = 0;
   p->cpu_burst = 0;
   p->timeslice = 0;
+  p->put_timestamp = 0;
+  p->exe_time = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -174,6 +175,8 @@ freeproc(struct proc *p)
   p->cpu_burst_aprox = 0;
   p->cpu_burst = 0;
   p->timeslice = 0;
+  p->put_timestamp = 0;
+  p->exe_time = 0;
 }
 
 // Create a user page table for a given process,
@@ -387,7 +390,7 @@ exit(int status)
 
   release(&wait_lock);
 
-  // Jump into the scheduler, never to return.
+  // Jump into the sched_policy, never to return.
   sched();
   panic("zombie exit");
 }
@@ -441,13 +444,13 @@ wait(uint64 addr)
   }
 }
 
-// Per-CPU process scheduler.
-// Each CPU calls scheduler() after setting itself up.
+// Per-CPU process sched_policy.
+// Each CPU calls sched_policy() after setting itself up.
 // Scheduler never returns.  It loops, doing:
 //  - choose a process to run.
 //  - swtch to start running that process.
 //  - eventually that process transfers control
-//    via swtch back to the scheduler.
+//    via swtch back to the sched_policy.
 void
 scheduler(void)
 {
@@ -494,7 +497,7 @@ scheduler(void)
   }
 }
 
-// Switch to scheduler.  Must hold only p->lock
+// Switch to sched_policy.  Must hold only p->lock
 // and have changed proc->state. Saves and restores
 // intena because intena is a property of this
 // kernel thread, not this CPU. It should
@@ -533,14 +536,14 @@ yield(void)
   release(&p->lock);
 }
 
-// A fork child's very first scheduling by scheduler()
+// A fork child's very first scheduling by sched_policy()
 // will swtch to forkret.
 void
 forkret(void)
 {
   static int first = 1;
 
-  // Still holding p->lock from scheduler.
+  // Still holding p->lock from sched_policy.
   release(&myproc()->lock);
 
   if (first) {
@@ -690,17 +693,17 @@ procdump(void)
 
 ///////////////////////////
 
-void heapify_up(struct proc** arr, int n)
+void heapify_up(struct proc** arr, int n, int algo)
 {
     if (n == 1) return;
     int curr = n - 1;
-    int parent = (n - 1) / 2;
+    int parent = curr / 2;
 
     while (1)
     {
-        if (arr[curr]->cpu_burst_aprox < arr[parent]->cpu_burst_aprox)
-        {
-            struct proc* tmp = arr[curr];
+        if ((algo == 0 && arr[curr]->cpu_burst_aprox < arr[parent]->cpu_burst_aprox) ||
+            (algo != 0 && arr[curr]->exe_time < arr[parent]->exe_time)) {
+            struct proc *tmp = arr[curr];
             arr[curr] = arr[parent];
             arr[parent] = tmp;
         }
@@ -711,23 +714,30 @@ void heapify_up(struct proc** arr, int n)
     }
 }
 
-void heapify_down(struct proc** arr, int n)
+void heapify_down(struct proc** arr, int n, int algo)
+{
+    heapify_down_i(arr,n,0,algo);
+}
+
+void heapify_down_i(struct proc** arr, int n, int i, int algo)
 {
     if (n == 1) return;
-    int curr = 0;
+    int curr = i;
     int left_child = curr * 2 + 1;
     int right_child = curr * 2 + 2;
 
     while(1)
     {
-        if (left_child < n && arr[curr]->cpu_burst_aprox > arr[left_child]->cpu_burst_aprox)
+        if ((algo == 0 && left_child < n && arr[curr]->cpu_burst_aprox > arr[left_child]->cpu_burst_aprox) ||
+            (algo != 0 && left_child < n && arr[curr]->exe_time > arr[left_child]->exe_time))
         {
             struct proc* tmp = arr[curr];
             arr[curr] = arr[left_child];
             arr[left_child] = tmp;
             curr = left_child;
         }
-        else if (right_child < n && arr[curr]->cpu_burst_aprox > arr[right_child]->cpu_burst_aprox)
+        else if ((algo == 0 && right_child < n && arr[curr]->cpu_burst_aprox > arr[right_child]->cpu_burst_aprox) ||
+                 (algo != 0 && right_child < n && arr[curr]->cpu_burst_aprox > arr[right_child]->cpu_burst_aprox))
         {
             struct proc* tmp = arr[curr];
             arr[curr] = arr[right_child];
@@ -749,22 +759,28 @@ void put(struct proc *p)
         acquire(&p->lock);
         cpu_already_locked_the_lock = 0;
     }
-    acquire(&sjf_scheduler.lock);
+    acquire(&proc_sched.lock);
     // critical section
+
+    // exponential averaging
+    if (proc->state != RUNNING)
+        p->cpu_burst_aprox = (proc_sched.a * p->cpu_burst + (100 - proc_sched.a) * p->cpu_burst_aprox) / 100;
+
+    if (p->state == RUNNING) p->exe_time += p->cpu_burst;
+    else p->exe_time = 0;  // when process is suspended or has never been executed on the cpu, exe_time should reset
+
+    p->put_timestamp = ticks;
 
     p->state = RUNNABLE;
 
-    // exponential averaging
-    p->cpu_burst_aprox = (sjf_scheduler.a * p->cpu_burst + (100 - sjf_scheduler.a) * p->cpu_burst_aprox) / 100;
-
-    sjf_scheduler.heap[sjf_scheduler.heap_size] = p;
-    sjf_scheduler.heap_size += 1;
-    heapify_up((struct proc**) &sjf_scheduler.heap, sjf_scheduler.heap_size);
+    proc_sched.heap[proc_sched.heap_size] = p;
+    proc_sched.heap_size += 1;
+    heapify_up((struct proc**) &proc_sched.heap, proc_sched.heap_size, proc_sched.algorithm);
 
     //printf("put | pid: %d | cpu_burst: %d\n", p->pid, p->cpu_burst);
 
     // end of critical section
-    release(&sjf_scheduler.lock);
+    release(&proc_sched.lock);
     if (!cpu_already_locked_the_lock)
         release(&p->lock);
 }
@@ -772,18 +788,77 @@ void put(struct proc *p)
 struct proc* get()
 {
     struct proc* ret = 0;
-    acquire(&sjf_scheduler.lock);
+    acquire(&proc_sched.lock);
 
-    if (sjf_scheduler.heap_size==0) goto exit_get;
-    ret = sjf_scheduler.heap[0];
+    if (proc_sched.heap_size == 0) goto exit_get;
+    ret = proc_sched.heap[0];
     ret->cpu_burst = 0;
-    sjf_scheduler.heap[0] = sjf_scheduler.heap[sjf_scheduler.heap_size - 1];
-    sjf_scheduler.heap[sjf_scheduler.heap_size - 1] = 0;
-    sjf_scheduler.heap_size -= 1;
-    heapify_down((struct proc**) &sjf_scheduler.heap, sjf_scheduler.heap_size);
+    proc_sched.heap[0] = proc_sched.heap[proc_sched.heap_size - 1];
+    proc_sched.heap[proc_sched.heap_size - 1] = 0;
+    proc_sched.heap_size -= 1;
+    heapify_down((struct proc**) &proc_sched.heap, proc_sched.heap_size, proc_sched.algorithm);
 
-    exit_get:    release(&sjf_scheduler.lock);
+    if (proc_sched.algorithm == 1) {
+        int cfs_timeslice = (ticks - ret->put_timestamp) / (proc_sched.heap_size + 1); // +1 for zero-division prevention
+        if (cfs_timeslice == 0) cfs_timeslice++;
+        ret->timeslice = cfs_timeslice;
+    }
+
+    exit_get:    release(&proc_sched.lock);
     return ret;
 }
 
+//////////////////
+
+void rearrange_heap(struct proc** arr, int n, int algo)
+{
+    int i_init = n / 2 - 1; // index of last non-leaf element
+
+    for (int i = i_init; i >= 0; i--)
+        heapify_down_i(arr, n, i, algo);
+}
+
+/*
+// when changing the process scheduling policy, we must sort the heap by different criteria
+int change_sched(int algo, int is_preemptive, int a){
+    acquire(&proc_sched.lock);
+
+    int new_algo = (proc_sched.algorithm == 0 ? 1 : 0);
+    proc_sched.algorithm = new_algo;
+
+    rearrange_heap((struct proc **) &proc_sched.heap, proc_sched.heap_size, new_algo);
+
+    release(&proc_sched.lock);
+    return new_algo;
+}
+ */
+
+int change_sched(int algo, int is_preemptive, int a){
+    if (algo < 0 || algo > 1 || is_preemptive<0) return -2;
+    if (algo == 0 && (a<0 || a>100)) return -3;
+    acquire(&proc_sched.lock);
+
+    proc_sched.algorithm = algo;
+    proc_sched.is_preemptive = is_preemptive;
+    proc_sched.a = a;
+
+    rearrange_heap((struct proc **) &proc_sched.heap, proc_sched.heap_size, algo);
+
+    release(&proc_sched.lock);
+    return 0;
+}
+
+//////////////////////////
+
+// timer interrupt routine called from trap.c
+void timer_routine(struct proc* p)
+{
+    p->cpu_burst += 1;
+
+    //printf("timer | pid: %d | cpu_burst: %d\n", myproc()->pid, myproc()->cpu_burst);
+
+    if ((p->timeslice != 0 && p->cpu_burst == p->timeslice) ||
+        (proc_sched.algorithm == 0 && proc_sched.is_preemptive==1))
+        yield();
+}
 

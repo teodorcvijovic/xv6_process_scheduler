@@ -8,7 +8,7 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
-struct sjf;
+struct sched_policy;
 
 // bio.c
 void            binit(void);
@@ -108,8 +108,14 @@ void            procdump(void);
 
 void            put(struct proc*);
 struct proc*    get();
-void            heapify_up(struct proc**, int n);
-void            heapify_down(struct proc**, int n);
+void            heapify_up(struct proc**, int n, int algo);
+void            heapify_down(struct proc**, int n, int algo);
+void            heapify_down_i(struct proc**, int n, int i, int algo);
+
+int             change_sched(int, int, int);
+void            rearrange_heap(struct proc**, int n, int algo);
+
+void            timer_routine(struct proc*);
 
 // swtch.S
 void            swtch(struct context*, struct context*);

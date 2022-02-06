@@ -29,16 +29,7 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
-// timer interrupt routine
-void timer_routine(struct proc* p)
-{
-    p->cpu_burst += 1;
 
-    //printf("timer | pid: %d | cpu_burst: %d\n", myproc()->pid, myproc()->cpu_burst);
-
-    if (p->timeslice != 0 && p->cpu_burst == p->timeslice)
-        yield();
-}
 
 //
 // handle an interrupt, exception, or system call from user space.

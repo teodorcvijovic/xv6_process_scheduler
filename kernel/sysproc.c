@@ -7,6 +7,21 @@
 #include "spinlock.h"
 #include "proc.h"
 
+// system call for changing process scheduling policy
+uint64
+sys_chsched(void)
+{
+    int algo;
+    int is_preemptive;
+    int a;
+
+    if(argint(0, &algo)<0) return -1;
+    if(argint(1, &is_preemptive)<0) return -1;
+    if(argint(2, &a)<0) return -1;
+
+    return change_sched(algo, is_preemptive, a);
+}
+
 uint64
 sys_exit(void)
 {

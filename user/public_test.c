@@ -86,6 +86,8 @@ main(int argc, char *argv[])
         wait(0);
     }
 
+    //printf("%d\n", chsched());
+
     exit(0);
 }
 
